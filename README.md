@@ -1,5 +1,7 @@
 # DuckFolio - rozliczenie portfela inwestycyjnego w Ducklingu
 
+![Napisane w Duckling](https://img.shields.io/badge/napisane%20w-Duckling-f2c94c)
+
 Zespół: Pixel of Software (Marcin Kowalczyk). Temat: P01 DuckFolio. Skład: 1 osoba.
 
 Program odtwarza stan fikcyjnego portfela inwestycyjnego na wybrany dzień z historii operacji i cen zapisanych w plikach CSV. Liczy gotówkę, liczbę jednostek, wartość i udział każdego składnika oraz wynik w złotych, który nie wlicza wpłat i wypłat. Całe minimum karty P01 działa i jest sprawdzone testami. Z rozszerzeń są:
