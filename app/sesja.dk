@@ -1,0 +1,422 @@
+#{
+    Interfejs tekstowy: polecenia wpisywane wiersz po wierszu (albo podane w pliku na
+    standardowym wejściu). Każde polecenie zwraca tekst odpowiedzi i informację, czy się
+    powiodło. Dane w sesji zmieniają się tylko po w pełni poprawnym poleceniu.
+#}
+import core.containers.*;
+import app.tekst;
+import app.dane;
+import app.portfel;
+import app.wycena;
+import app.pliki;
+
+let DOMYSLNE_OPERACJE = "dane/operacje.csv";
+let DOMYSLNE_CENY = "dane/ceny.csv";
+
+class Sesja {
+    operacje: List[dane.Operacja];
+    ceny: List[dane.Cena];
+    wczytane: bool = false;
+    wstecz: bool = false;      # polityka brakującej ceny: false = ścisła
+    koniec: bool = false;
+}
+
+class Odpowiedz {
+    ok: bool = false;
+    tekst: String;
+}
+
+fun pomoc() -> String = {
+    var w: String;
+    w.append("Polecenia:\n");
+    w.append("  wczytaj [operacje.csv ceny.csv]   wczytuje dane (domyslnie dane/operacje.csv i dane/ceny.csv)\n");
+    w.append("  raport RRRR-MM-DD                 stan, wartosci, udzialy i wynik na koniec dnia\n");
+    w.append("  historia [RRRR-MM-DD]             wartosc i wynik dzien po dniu (domyslnie do ostatniej daty)\n");
+    w.append("  dodaj <wiersz CSV operacji>       np. dodaj 2026-01-05,2,sprzedaz,ALFA,7,25.00,,1.00\n");
+    w.append("  cena RRRR-MM-DD INSTRUMENT CENA   dodaje albo zmienia cene\n");
+    w.append("  usun-cene RRRR-MM-DD INSTRUMENT   usuwa cene (np. do proby braku wyceny)\n");
+    w.append("  wycena scisla|wstecz              polityka brakujacej ceny (domyslnie scisla)\n");
+    w.append("  operacje                          lista operacji po sortowaniu\n");
+    w.append("  sprawdz plik.csv                  porownanie z oczekiwanymi wynikami\n");
+    w.append("  pomoc, koniec\n");
+    w.append("Wiersze zaczynajace sie od # sa komentarzami.\n");
+    return w;
+}
+
+fun listaBledow(naglowek: str, bledy: ref List[String]) -> String = {
+    var w: String;
+    w.append(naglowek);
+    w.append("\n");
+    var i: i64 = 0;
+    while (i < bledy.length()) {
+        w.append(f"  - {bledy.at(i).asSlice()}\n");
+        i += 1;
+    }
+    return w;
+}
+
+fun odmowa(komunikat: str) -> Odpowiedz = {
+    var o: Odpowiedz;
+    o.tekst.append(komunikat);
+    o.tekst.append("\n");
+    return o;
+}
+
+fun ostatniDzien(s: ref Sesja) -> i64 = {
+    var d: i64 = 0;
+    var i: i64 = 0;
+    while (i < s.operacje.length()) {
+        if (s.operacje.at(i).dzien > d) d = s.operacje.at(i).dzien;
+        i += 1;
+    }
+    var j: i64 = 0;
+    while (j < s.ceny.length()) {
+        if (s.ceny.at(j).dzien > d) d = s.ceny.at(j).dzien;
+        j += 1;
+    }
+    return d;
+}
+
+#{
+    Wczytanie obu plików w całości: jeśli którykolwiek wiersz jest błędny albo któraś operacja
+    zostałaby odrzucona przy odtwarzaniu portfela, poprzednie dane zostają bez zmian.
+#}
+fun wczytajZTekstu(s: ref Sesja, tekstOperacji: str, tekstCen: str) -> Odpowiedz = {
+    var o: Odpowiedz;
+    var operacje = dane.wczytajOperacje(tekstOperacji);
+    var ceny = dane.wczytajCeny(tekstCen);
+    if (not operacje.ok or not ceny.ok) {
+        var bledy: List[String];
+        var i: i64 = 0;
+        while (i < operacje.bledy.length()) { bledy.push(f"operacje, {operacje.bledy.at(i).asSlice()}"); i += 1; }
+        var j: i64 = 0;
+        while (j < ceny.bledy.length()) { bledy.push(f"ceny, {ceny.bledy.at(j).asSlice()}"); j += 1; }
+        o.tekst = listaBledow("Dane odrzucone (poprzedni stan bez zmian):", &bledy);
+        return o;
+    }
+    var stan = portfel.odtworz(&operacje.operacje, 9223372036854775807);
+    if (stan.bledy.length() > 0) {
+        o.tekst = listaBledow("Dane odrzucone - operacje niewykonalne (poprzedni stan bez zmian):", &stan.bledy);
+        return o;
+    }
+    s.operacje = copy operacje.operacje;
+    s.ceny = copy ceny.ceny;
+    s.wczytane = true;
+    o.ok = true;
+    o.tekst.append(f"Wczytano {s.operacje.length()} operacji i {s.ceny.length()} cen.\n");
+    return o;
+}
+
+fun wczytajPliki(s: ref Sesja, sciezkaOperacji: str, sciezkaCen: str) -> Odpowiedz = {
+    let plikOperacji = pliki.wczytaj(sciezkaOperacji);
+    if (not plikOperacji.ok) return odmowa(f"Blad: {plikOperacji.blad.asSlice()}".asSlice());
+    let plikCen = pliki.wczytaj(sciezkaCen);
+    if (not plikCen.ok) return odmowa(f"Blad: {plikCen.blad.asSlice()}".asSlice());
+    return wczytajZTekstu(s, plikOperacji.tresc.asSlice(), plikCen.tresc.asSlice());
+}
+
+# Dodanie jednej operacji: musi być poprawna i wykonalna razem z całą historią.
+fun dodaj(s: ref Sesja, wiersz: str) -> Odpowiedz = {
+    var p = tekst.pola(wiersz, ',');
+    var jedna = dane.operacjaZPol(&p, 0);
+    if (not jedna.ok) return odmowa(f"Operacja odrzucona: {jedna.blad.asSlice()}. Portfel bez zmian.".asSlice());
+    var nowe = copy s.operacje;
+    if (not dane.wstaw(&nowe, copy jedna.operacja)) {
+        return odmowa("Operacja odrzucona: ta para data i kolejnosc juz istnieje. Portfel bez zmian.");
+    }
+    var stan = portfel.odtworz(&nowe, 9223372036854775807);
+    if (stan.bledy.length() > 0) {
+        var o: Odpowiedz;
+        o.tekst = listaBledow("Operacja odrzucona, portfel bez zmian:", &stan.bledy);
+        return o;
+    }
+    s.operacje = move nowe;
+    var o2: Odpowiedz;
+    o2.ok = true;
+    let data = tekst.tekstDaty(jedna.operacja.dzien);
+    o2.tekst.append(f"Dodano operacje {dane.nazwaTypu(jedna.operacja.typ)} z dnia {data.asSlice()} (kolejnosc {jedna.operacja.kolejnosc}).\n");
+    return o2;
+}
+
+fun ustawCene(s: ref Sesja, dataTekst: str, instrument: str, cenaTekst: str) -> Odpowiedz = {
+    let data = tekst.parsujDate(dataTekst);
+    if (not data.ok) return odmowa(f"Blad: niepoprawna data '{dataTekst}'.".asSlice());
+    if (not dane.poprawnaNazwa(instrument)) return odmowa(f"Blad: niepoprawna nazwa instrumentu '{instrument}'.".asSlice());
+    let cena = tekst.parsujKwote(cenaTekst, dane.MAKS_CENA);
+    if (not cena.ok or cena.wartosc <= 0) return odmowa(f"Blad: cena musi byc dodatnia kwota, jest '{cenaTekst}'.".asSlice());
+    let i = dane.indeksCeny(&s.ceny, instrument, data.dzien);
+    var o: Odpowiedz;
+    o.ok = true;
+    if (i >= 0) {
+        s.ceny.at(i).cena = cena.wartosc;
+        o.tekst.append(f"Zmieniono cene {instrument} z dnia {dataTekst}.\n");
+    } else {
+        var c: dane.Cena;
+        c.dzien = data.dzien;
+        c.instrument.append(instrument);
+        c.cena = cena.wartosc;
+        s.ceny.push(move c);
+        o.tekst.append(f"Dodano cene {instrument} z dnia {dataTekst}.\n");
+    }
+    return o;
+}
+
+fun usunCene(s: ref Sesja, dataTekst: str, instrument: str) -> Odpowiedz = {
+    let data = tekst.parsujDate(dataTekst);
+    if (not data.ok) return odmowa(f"Blad: niepoprawna data '{dataTekst}'.".asSlice());
+    let i = dane.indeksCeny(&s.ceny, instrument, data.dzien);
+    if (i < 0) return odmowa(f"Blad: nie ma ceny {instrument} z dnia {dataTekst}.".asSlice());
+    var reszta: List[dane.Cena];
+    var k: i64 = 0;
+    while (k < s.ceny.length()) {
+        if (k != i) reszta.push(copy s.ceny.at(k));
+        k += 1;
+    }
+    s.ceny = move reszta;
+    var o: Odpowiedz;
+    o.ok = true;
+    o.tekst.append(f"Usunieto cene {instrument} z dnia {dataTekst}.\n");
+    return o;
+}
+
+fun listaOperacji(s: ref Sesja) -> String = {
+    var w: String;
+    w.append("Operacje w kolejnosci przetwarzania (data, kolejnosc):\n");
+    var i: i64 = 0;
+    while (i < s.operacje.length()) {
+        let op = s.operacje.at(i);
+        let data = tekst.tekstDaty(op.dzien);
+        w.append(f"  {data.asSlice()} #{op.kolejnosc} {dane.nazwaTypu(op.typ)}");
+        if (op.typ == dane.KUPNO or op.typ == dane.SPRZEDAZ) {
+            let cena = tekst.kwotaTekst(op.cena);
+            w.append(f" {op.instrument.asSlice()} {op.liczba} x {cena.asSlice()}");
+        } else {
+            let kwota = tekst.kwotaTekst(op.kwota);
+            w.append(f" {kwota.asSlice()}");
+        }
+        let prowizja = tekst.kwotaTekst(op.prowizja);
+        w.append(f", prowizja {prowizja.asSlice()}\n");
+        i += 1;
+    }
+    return w;
+}
+
+class Porownanie {
+    ok: bool = false;          # plik poprawny i wszystkie dni zgodne
+    zgodne: i64 = 0;
+    wszystkie: i64 = 0;
+    tekst: String;
+}
+
+fun indeksKolumny(naglowek: ref List[String], nazwa: str) -> i64 = {
+    var i: i64 = 0;
+    while (i < naglowek.length()) {
+        if (tekst.rowne(naglowek.at(i).asSlice(), nazwa)) return i;
+        i += 1;
+    }
+    return -1;
+}
+
+fun porownajPole(w: ref String, nazwa: str, oczekiwane: i64, otrzymane: i64, kwota: bool) -> bool = {
+    if (oczekiwane == otrzymane) return true;
+    if (kwota) {
+        let a = tekst.kwotaTekst(oczekiwane);
+        let b = tekst.kwotaTekst(otrzymane);
+        w.append(f"    {nazwa}: oczekiwano {a.asSlice()}, jest {b.asSlice()}\n");
+    } else {
+        w.append(f"    {nazwa}: oczekiwano {oczekiwane}, jest {otrzymane}\n");
+    }
+    return false;
+}
+
+#{
+    Porównanie z plikiem oczekiwanych wyników. Wymagane kolumny: data, gotowka,
+    wartosc_portfela, wplaty_zewnetrzne, wyplaty_zewnetrzne, wynik_kwotowy; dodatkowo dla
+    każdego instrumentu mogą być kolumny <nazwa>_liczba i <nazwa>_wartosc (małymi literami).
+#}
+fun porownaj(s: ref Sesja, zawartosc: str) -> Porownanie = {
+    var wynik: Porownanie;
+    let linie = tekst.wiersze(zawartosc);
+    if (linie.length() == 0) {
+        wynik.tekst.append("Plik oczekiwanych wynikow jest pusty.\n");
+        return wynik;
+    }
+    var naglowek = tekst.pola(linie.at(0).asSlice(), ',');
+    let kData = indeksKolumny(&naglowek, "data");
+    let kGotowka = indeksKolumny(&naglowek, "gotowka");
+    let kWartosc = indeksKolumny(&naglowek, "wartosc_portfela");
+    let kWplaty = indeksKolumny(&naglowek, "wplaty_zewnetrzne");
+    let kWyplaty = indeksKolumny(&naglowek, "wyplaty_zewnetrzne");
+    let kWynik = indeksKolumny(&naglowek, "wynik_kwotowy");
+    if (kData < 0 or kGotowka < 0 or kWartosc < 0 or kWplaty < 0 or kWyplaty < 0 or kWynik < 0) {
+        wynik.tekst.append("Brak wymaganych kolumn (data, gotowka, wartosc_portfela, wplaty_zewnetrzne, wyplaty_zewnetrzne, wynik_kwotowy).\n");
+        return wynik;
+    }
+    var bledyPliku = false;
+    var n: i64 = 1;
+    while (n < linie.length()) {
+        let linia = tekst.przytnij(linie.at(n).asSlice());
+        if (linia.length() > 0) {
+            wynik.wszystkie += 1;
+            let p = tekst.pola(linia.asSlice(), ',');
+            let data = tekst.parsujDate(p.at(kData).asSlice());
+            if (p.length() != naglowek.length() or not data.ok) {
+                wynik.tekst.append(f"  wiersz {n + 1}: niepoprawny wiersz pliku oczekiwanych wynikow\n");
+                bledyPliku = true;
+            } else {
+                var r = wycena.raport(&s.operacje, &s.ceny, data.dzien, s.wstecz);
+                var opis: String;
+                var zgodny = r.ok;
+                if (not r.ok) {
+                    opis.append(f"    raport odrzucony: {r.bledy.at(0).asSlice()}\n");
+                } else {
+                    var k: i64 = 0;
+                    while (k < naglowek.length()) {
+                        let kol = naglowek.at(k).asSlice();
+                        let wartoscPola = p.at(k).asSlice();
+                        if (k == kGotowka or k == kWartosc or k == kWplaty or k == kWyplaty or k == kWynik) {
+                            var znak: i64 = 1;
+                            var bezMinusa = copy p.at(k);
+                            if (wartoscPola.length() > 0 and wartoscPola[0] == '-') {
+                                znak = -1;
+                                bezMinusa = tekst.wytnij(wartoscPola, 1, wartoscPola.length() - 1);
+                            }
+                            let liczbowo = tekst.parsujKwote(bezMinusa.asSlice(), 9000000000000000);
+                            var otrzymane: i64 = r.gotowka;
+                            if (k == kWartosc) otrzymane = r.wartosc;
+                            if (k == kWplaty) otrzymane = r.wplaty;
+                            if (k == kWyplaty) otrzymane = r.wyplaty;
+                            if (k == kWynik) otrzymane = r.wynik;
+                            if (not liczbowo.ok) {
+                                opis.append(f"    {kol}: niepoprawna kwota '{wartoscPola}'\n");
+                                zgodny = false;
+                            } else if (not porownajPole(&opis, kol, znak * liczbowo.wartosc, otrzymane, true)) {
+                                zgodny = false;
+                            }
+                        } else if (tekst.konczySie(kol, "_liczba") or tekst.konczySie(kol, "_wartosc")) {
+                            let jednostki = tekst.konczySie(kol, "_liczba");
+                            var dlugoscNazwy = kol.length() - 8;
+                            if (jednostki) dlugoscNazwy = kol.length() - 7;
+                            let instrument = tekst.duzeLitery(tekst.wytnij(kol, 0, dlugoscNazwy).asSlice());
+                            if (jednostki) {
+                                let oczekJ = tekst.parsujLiczbe(wartoscPola, dane.MAKS_LICZBA);
+                                if (not oczekJ.ok or not porownajPole(&opis, kol, oczekJ.wartosc, wycena.jednostkiInstrumentu(&r, instrument.asSlice()), false)) zgodny = false;
+                            } else {
+                                let oczekW = tekst.parsujKwote(wartoscPola, 9000000000000000);
+                                if (not oczekW.ok or not porownajPole(&opis, kol, oczekW.wartosc, wycena.wartoscInstrumentu(&r, instrument.asSlice()), true)) zgodny = false;
+                            }
+                        }
+                        k += 1;
+                    }
+                }
+                let dataTekst = tekst.tekstDaty(data.dzien);
+                if (zgodny) {
+                    wynik.zgodne += 1;
+                    wynik.tekst.append(f"  {dataTekst.asSlice()}  ZGODNE\n");
+                } else {
+                    wynik.tekst.append(f"  {dataTekst.asSlice()}  ROZNICA\n");
+                    wynik.tekst.append(opis.asSlice());
+                }
+            }
+        }
+        n += 1;
+    }
+    wynik.tekst.append(f"Zgodne dni: {wynik.zgodne}/{wynik.wszystkie}\n");
+    wynik.ok = not bledyPliku and wynik.zgodne == wynik.wszystkie and wynik.wszystkie > 0;
+    return wynik;
+}
+
+fun wymagaDanych(s: ref Sesja) -> bool = s.wczytane;
+
+# Wykonuje jedno polecenie tekstowe.
+fun wykonaj(s: ref Sesja, linia: str) -> Odpowiedz = {
+    let czysta = tekst.przytnij(linia);
+    var o: Odpowiedz;
+    if (czysta.length() == 0 or czysta.asSlice()[0] == '#') {
+        o.ok = true;
+        return o;
+    }
+    let czesci = tekst.slowa(czysta.asSlice());
+    let polecenie = czesci.at(0).asSlice();
+    if (tekst.rowne(polecenie, "pomoc")) {
+        o.ok = true;
+        o.tekst = pomoc();
+        return o;
+    }
+    if (tekst.rowne(polecenie, "koniec")) {
+        s.koniec = true;
+        o.ok = true;
+        return o;
+    }
+    if (tekst.rowne(polecenie, "wczytaj")) {
+        if (czesci.length() == 1) return wczytajPliki(s, DOMYSLNE_OPERACJE, DOMYSLNE_CENY);
+        if (czesci.length() == 3) return wczytajPliki(s, czesci.at(1).asSlice(), czesci.at(2).asSlice());
+        return odmowa("Uzycie: wczytaj [operacje.csv ceny.csv]");
+    }
+    if (tekst.rowne(polecenie, "wycena")) {
+        if (czesci.length() == 2 and tekst.rowne(czesci.at(1).asSlice(), "scisla")) {
+            s.wstecz = false;
+            o.ok = true;
+            o.tekst.append("Polityka brakujacej ceny: scisla (brak ceny z dnia raportu to blad).\n");
+            return o;
+        }
+        if (czesci.length() == 2 and tekst.rowne(czesci.at(1).asSlice(), "wstecz")) {
+            s.wstecz = true;
+            o.ok = true;
+            o.tekst.append("Polityka brakujacej ceny: wstecz (najnowsza wczesniejsza cena, oznaczona; nigdy cena z dnia pozniejszego).\n");
+            return o;
+        }
+        return odmowa("Uzycie: wycena scisla|wstecz");
+    }
+    if (not wymagaDanych(s)) return odmowa("Najpierw wczytaj dane poleceniem 'wczytaj'.");
+    if (tekst.rowne(polecenie, "raport")) {
+        if (czesci.length() != 2) return odmowa("Uzycie: raport RRRR-MM-DD");
+        let data = tekst.parsujDate(czesci.at(1).asSlice());
+        if (not data.ok) return odmowa(f"Blad: niepoprawna data '{czesci.at(1).asSlice()}' (RRRR-MM-DD, istniejacy dzien).".asSlice());
+        var r = wycena.raport(&s.operacje, &s.ceny, data.dzien, s.wstecz);
+        o.ok = r.ok;
+        o.tekst = wycena.opisRaportu(&r);
+        return o;
+    }
+    if (tekst.rowne(polecenie, "historia")) {
+        var doDnia = ostatniDzien(s);
+        if (czesci.length() == 2) {
+            let data = tekst.parsujDate(czesci.at(1).asSlice());
+            if (not data.ok) return odmowa(f"Blad: niepoprawna data '{czesci.at(1).asSlice()}'.".asSlice());
+            doDnia = data.dzien;
+        } else if (czesci.length() != 1) {
+            return odmowa("Uzycie: historia [RRRR-MM-DD]");
+        }
+        o.ok = true;
+        o.tekst = wycena.opisHistorii(&s.operacje, &s.ceny, doDnia, s.wstecz);
+        return o;
+    }
+    if (tekst.rowne(polecenie, "dodaj")) {
+        if (czesci.length() != 2) return odmowa("Uzycie: dodaj data,kolejnosc,typ,instrument,liczba,cena,kwota,prowizja (bez spacji)");
+        return dodaj(s, czesci.at(1).asSlice());
+    }
+    if (tekst.rowne(polecenie, "cena")) {
+        if (czesci.length() != 4) return odmowa("Uzycie: cena RRRR-MM-DD INSTRUMENT CENA");
+        return ustawCene(s, czesci.at(1).asSlice(), czesci.at(2).asSlice(), czesci.at(3).asSlice());
+    }
+    if (tekst.rowne(polecenie, "usun-cene")) {
+        if (czesci.length() != 3) return odmowa("Uzycie: usun-cene RRRR-MM-DD INSTRUMENT");
+        return usunCene(s, czesci.at(1).asSlice(), czesci.at(2).asSlice());
+    }
+    if (tekst.rowne(polecenie, "operacje")) {
+        o.ok = true;
+        o.tekst = listaOperacji(s);
+        return o;
+    }
+    if (tekst.rowne(polecenie, "sprawdz")) {
+        if (czesci.length() != 2) return odmowa("Uzycie: sprawdz plik.csv");
+        let plik = pliki.wczytaj(czesci.at(1).asSlice());
+        if (not plik.ok) return odmowa(f"Blad: {plik.blad.asSlice()}".asSlice());
+        let wynik = porownaj(s, plik.tresc.asSlice());
+        o.ok = wynik.ok;
+        o.tekst.append(f"Porownanie z {czesci.at(1).asSlice()}:\n");
+        o.tekst.append(wynik.tekst.asSlice());
+        return o;
+    }
+    return odmowa(f"Nieznane polecenie '{polecenie}'. Wpisz 'pomoc'.".asSlice());
+}

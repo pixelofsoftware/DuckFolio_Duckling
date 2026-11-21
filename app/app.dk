@@ -1,0 +1,50 @@
+#{
+    DuckFolio: punkt wejścia. Czyta polecenia ze standardowego wejścia, wiersz po wierszu,
+    i wypisuje odpowiedzi. Na końcu wejścia (albo po poleceniu "koniec") kończy pracę.
+    Kod zakończenia: 0, gdy wszystkie polecenia się powiodły, 1, gdy któreś zostało odrzucone.
+#}
+import core.containers.*;
+import core.primitive_io as io;
+import sesja;
+
+class Wiersz {
+    tekst: String;
+    koniecWejscia: bool = false;
+}
+
+# Jeden wiersz wejścia; odróżnia pusty wiersz od końca danych.
+fun czytajWiersz() -> Wiersz = {
+    var wynik: Wiersz;
+    var znak = io.readCharCode();
+    if (znak < 0) {
+        wynik.koniecWejscia = true;
+        return wynik;
+    }
+    while (znak >= 0 and znak != '\n' as i32) {
+        wynik.tekst.append(znak as char);
+        znak = io.readCharCode();
+    }
+    return wynik;
+}
+
+fun main() -> i64 = {
+    print("DuckFolio - rozliczenie portfela inwestycyjnego. Wpisz 'pomoc'.\n");
+    var s: sesja.Sesja;
+    var odrzucone: i64 = 0;
+    var dalej = true;
+    while (dalej) {
+        print("duckfolio> ");
+        let wiersz = czytajWiersz();
+        if (wiersz.koniecWejscia) {
+            dalej = false;
+            print("\n");
+        } else {
+            let odpowiedz = sesja.wykonaj(&s, wiersz.tekst.asSlice());
+            print(odpowiedz.tekst.asSlice());
+            if (not odpowiedz.ok) odrzucone += 1;
+            if (s.koniec) dalej = false;
+        }
+    }
+    if (odrzucone > 0) return 1;
+    return 0;
+}

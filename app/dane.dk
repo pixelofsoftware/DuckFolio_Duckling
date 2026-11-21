@@ -1,0 +1,277 @@
+#{
+    Wczytanie operacji i cen z tekstu CSV (UTF-8, nagłówek, separator przecinek) z pełnym
+    sprawdzeniem każdego wiersza. Błędny plik nie daje częściowych danych: wynik ma ok = false
+    i listę wszystkich znalezionych błędów z numerami wierszy.
+
+    Operacje są sortowane po parze (data, kolejność), więc kolejność wierszy w pliku nie ma
+    znaczenia; para (data, kolejność) musi być jednoznaczna.
+#}
+import core.containers.*;
+import app.tekst;
+
+# Typy operacji.
+const WPLATA: i32 = 1;
+const WYPLATA: i32 = 2;
+const KUPNO: i32 = 3;
+const SPRZEDAZ: i32 = 4;
+
+# Granice danych: iloczyn liczba x cena mieści się w i64 z dużym zapasem.
+const MAKS_LICZBA: i64 = 10000000;          # 10 mln jednostek
+const MAKS_CENA: i64 = 1000000000;          # 10 mln zł za jednostkę (w groszach)
+const MAKS_KWOTA: i64 = 1000000000000;      # 10 mld zł (w groszach)
+const MAKS_KOLEJNOSC: i64 = 1000000;
+const MAKS_DLUGOSC_NAZWY: i64 = 12;
+
+let NAGLOWEK_OPERACJI = "data,kolejnosc,typ,instrument,liczba,cena,kwota,prowizja";
+let NAGLOWEK_CEN = "data,instrument,cena";
+
+class Operacja {
+    dzien: i64 = 0;
+    kolejnosc: i64 = 0;
+    typ: i32 = 0;
+    instrument: String;
+    liczba: i64 = 0;
+    cena: i64 = 0;
+    kwota: i64 = 0;
+    prowizja: i64 = 0;
+    wiersz: i64 = 0;          # numer wiersza w pliku (0 = operacja dodana poleceniem)
+}
+
+class Cena {
+    dzien: i64 = 0;
+    instrument: String;
+    cena: i64 = 0;
+    wiersz: i64 = 0;
+}
+
+class WczytaneOperacje {
+    ok: bool = false;
+    operacje: List[Operacja];
+    bledy: List[String];
+}
+
+class WczytaneCeny {
+    ok: bool = false;
+    ceny: List[Cena];
+    bledy: List[String];
+}
+
+class JednaOperacja {
+    ok: bool = false;
+    operacja: Operacja;
+    blad: String;
+}
+
+fun nazwaTypu(typ: i32) -> str = {
+    if (typ == WPLATA) return "wplata";
+    if (typ == WYPLATA) return "wyplata";
+    if (typ == KUPNO) return "kupno";
+    return "sprzedaz";
+}
+
+# Nazwa instrumentu: 1-12 znaków A-Z, 0-9, '_' lub '-'; zaczyna się literą.
+fun poprawnaNazwa(nazwa: str) -> bool = {
+    if (nazwa.length() < 1 or nazwa.length() > MAKS_DLUGOSC_NAZWY) return false;
+    if (not (nazwa[0] >= 'A' and nazwa[0] <= 'Z')) return false;
+    var i: i64 = 0;
+    while (i < nazwa.length()) {
+        let znak = nazwa[i];
+        let dobry = (znak >= 'A' and znak <= 'Z') or (znak >= '0' and znak <= '9') or znak == '_' or znak == '-';
+        if (not dobry) return false;
+        i += 1;
+    }
+    return true;
+}
+
+fun opisWiersza(wiersz: i64) -> String = {
+    if (wiersz == 0) return f"operacja dodana";
+    return f"wiersz {wiersz}";
+}
+
+# Jedna operacja z listy pól (bez nagłówka). Komunikat błędu zaczyna się od opisu wiersza.
+fun operacjaZPol(p: ref List[String], wiersz: i64) -> JednaOperacja = {
+    var wynik: JednaOperacja;
+    let gdzie = opisWiersza(wiersz);
+    if (p.length() != 8) {
+        wynik.blad.append(f"{gdzie.asSlice()}: oczekiwano 8 pol, jest {p.length()}");
+        return wynik;
+    }
+    let data = tekst.parsujDate(p.at(0).asSlice());
+    if (not data.ok) {
+        wynik.blad.append(f"{gdzie.asSlice()}: niepoprawna data '{p.at(0).asSlice()}' (wymagany format RRRR-MM-DD i istniejacy dzien)");
+        return wynik;
+    }
+    let kolejnosc = tekst.parsujLiczbe(p.at(1).asSlice(), MAKS_KOLEJNOSC);
+    if (not kolejnosc.ok or kolejnosc.wartosc < 1) {
+        wynik.blad.append(f"{gdzie.asSlice()}: kolejnosc musi byc liczba calkowita od 1 do {MAKS_KOLEJNOSC}");
+        return wynik;
+    }
+    var typ: i32 = 0;
+    if (tekst.rowne(p.at(2).asSlice(), "wplata")) typ = WPLATA;
+    if (tekst.rowne(p.at(2).asSlice(), "wyplata")) typ = WYPLATA;
+    if (tekst.rowne(p.at(2).asSlice(), "kupno")) typ = KUPNO;
+    if (tekst.rowne(p.at(2).asSlice(), "sprzedaz")) typ = SPRZEDAZ;
+    if (typ == 0) {
+        wynik.blad.append(f"{gdzie.asSlice()}: nieznany typ operacji '{p.at(2).asSlice()}' (wplata, wyplata, kupno, sprzedaz)");
+        return wynik;
+    }
+    var op: Operacja;
+    op.dzien = data.dzien;
+    op.kolejnosc = kolejnosc.wartosc;
+    op.typ = typ;
+    op.wiersz = wiersz;
+    # Prowizja: puste pole oznacza 0.
+    if (p.at(7).length() > 0) {
+        let prowizja = tekst.parsujKwote(p.at(7).asSlice(), MAKS_KWOTA);
+        if (not prowizja.ok) {
+            wynik.blad.append(f"{gdzie.asSlice()}: niepoprawna prowizja '{p.at(7).asSlice()}'");
+            return wynik;
+        }
+        op.prowizja = prowizja.wartosc;
+    }
+    if (typ == WPLATA or typ == WYPLATA) {
+        if (p.at(3).length() > 0 or p.at(4).length() > 0 or p.at(5).length() > 0) {
+            wynik.blad.append(f"{gdzie.asSlice()}: {nazwaTypu(typ)} nie ma instrumentu, liczby ani ceny (pola musza byc puste)");
+            return wynik;
+        }
+        let kwota = tekst.parsujKwote(p.at(6).asSlice(), MAKS_KWOTA);
+        if (not kwota.ok or kwota.wartosc <= 0) {
+            wynik.blad.append(f"{gdzie.asSlice()}: {nazwaTypu(typ)} wymaga dodatniej kwoty (np. 200.00), jest '{p.at(6).asSlice()}'");
+            return wynik;
+        }
+        op.kwota = kwota.wartosc;
+    } else {
+        if (p.at(6).length() > 0) {
+            wynik.blad.append(f"{gdzie.asSlice()}: {nazwaTypu(typ)} nie ma pola kwota (kwote liczymy z liczby i ceny)");
+            return wynik;
+        }
+        if (not poprawnaNazwa(p.at(3).asSlice())) {
+            wynik.blad.append(f"{gdzie.asSlice()}: niepoprawna nazwa instrumentu '{p.at(3).asSlice()}' (1-{MAKS_DLUGOSC_NAZWY} znakow A-Z, 0-9, _ lub -)");
+            return wynik;
+        }
+        let liczba = tekst.parsujLiczbe(p.at(4).asSlice(), MAKS_LICZBA);
+        if (not liczba.ok or liczba.wartosc < 1) {
+            wynik.blad.append(f"{gdzie.asSlice()}: liczba jednostek musi byc calkowita od 1 do {MAKS_LICZBA}, jest '{p.at(4).asSlice()}'");
+            return wynik;
+        }
+        let cena = tekst.parsujKwote(p.at(5).asSlice(), MAKS_CENA);
+        if (not cena.ok or cena.wartosc <= 0) {
+            wynik.blad.append(f"{gdzie.asSlice()}: cena musi byc dodatnia kwota (np. 20.00), jest '{p.at(5).asSlice()}'");
+            return wynik;
+        }
+        op.instrument.append(p.at(3).asSlice());
+        op.liczba = liczba.wartosc;
+        op.cena = cena.wartosc;
+    }
+    wynik.operacja = move op;
+    wynik.ok = true;
+    return wynik;
+}
+
+fun przed(a: ref Operacja, b: ref Operacja) -> bool = a.dzien < b.dzien or (a.dzien == b.dzien and a.kolejnosc < b.kolejnosc);
+
+# Wstawia operację w miejsce wynikające z (data, kolejność); zwraca false przy powtórzonej parze.
+fun wstaw(lista: ref List[Operacja], op: Operacja) -> bool = {
+    var i: i64 = 0;
+    while (i < lista.length()) {
+        if (lista.at(i).dzien == op.dzien and lista.at(i).kolejnosc == op.kolejnosc) return false;
+        i += 1;
+    }
+    var nowa: List[Operacja];
+    var wstawiona = false;
+    var j: i64 = 0;
+    while (j < lista.length()) {
+        if (not wstawiona and przed(&op, lista.at(j))) {
+            nowa.push(copy op);
+            wstawiona = true;
+        }
+        nowa.push(copy lista.at(j));
+        j += 1;
+    }
+    if (not wstawiona) nowa.push(copy op);
+    lista = move nowa;
+    return true;
+}
+
+fun wczytajOperacje(zawartosc: str) -> WczytaneOperacje = {
+    var wynik: WczytaneOperacje;
+    let linie = tekst.wiersze(zawartosc);
+    if (linie.length() == 0 or not tekst.rowne(tekst.przytnij(linie.at(0).asSlice()).asSlice(), NAGLOWEK_OPERACJI)) {
+        wynik.bledy.push(f"wiersz 1: oczekiwano naglowka '{NAGLOWEK_OPERACJI}'");
+        return wynik;
+    }
+    var numer: i64 = 1;
+    while (numer < linie.length()) {
+        let linia = tekst.przytnij(linie.at(numer).asSlice());
+        if (linia.length() > 0) {
+            var p = tekst.pola(linia.asSlice(), ',');
+            var jedna = operacjaZPol(&p, numer + 1);
+            if (not jedna.ok) {
+                wynik.bledy.push(copy jedna.blad);
+            } else {
+                let wiersz = numer + 1;
+                let dataTekst = tekst.tekstDaty(jedna.operacja.dzien);
+                let kolejnosc = jedna.operacja.kolejnosc;
+                if (not wstaw(&wynik.operacje, copy jedna.operacja)) {
+                    wynik.bledy.push(f"wiersz {wiersz}: powtorzona para data {dataTekst.asSlice()} i kolejnosc {kolejnosc}");
+                }
+            }
+        }
+        numer += 1;
+    }
+    wynik.ok = wynik.bledy.length() == 0;
+    if (not wynik.ok) wynik.operacje.clear();
+    return wynik;
+}
+
+fun wczytajCeny(zawartosc: str) -> WczytaneCeny = {
+    var wynik: WczytaneCeny;
+    let linie = tekst.wiersze(zawartosc);
+    if (linie.length() == 0 or not tekst.rowne(tekst.przytnij(linie.at(0).asSlice()).asSlice(), NAGLOWEK_CEN)) {
+        wynik.bledy.push(f"wiersz 1: oczekiwano naglowka '{NAGLOWEK_CEN}'");
+        return wynik;
+    }
+    var numer: i64 = 1;
+    while (numer < linie.length()) {
+        let linia = tekst.przytnij(linie.at(numer).asSlice());
+        let wiersz = numer + 1;
+        if (linia.length() > 0) {
+            let p = tekst.pola(linia.asSlice(), ',');
+            if (p.length() != 3) {
+                wynik.bledy.push(f"wiersz {wiersz}: oczekiwano 3 pol, jest {p.length()}");
+            } else {
+                let data = tekst.parsujDate(p.at(0).asSlice());
+                let cena = tekst.parsujKwote(p.at(2).asSlice(), MAKS_CENA);
+                if (not data.ok) {
+                    wynik.bledy.push(f"wiersz {wiersz}: niepoprawna data '{p.at(0).asSlice()}'");
+                } else if (not poprawnaNazwa(p.at(1).asSlice())) {
+                    wynik.bledy.push(f"wiersz {wiersz}: niepoprawna nazwa instrumentu '{p.at(1).asSlice()}'");
+                } else if (not cena.ok or cena.wartosc <= 0) {
+                    wynik.bledy.push(f"wiersz {wiersz}: cena musi byc dodatnia kwota, jest '{p.at(2).asSlice()}'");
+                } else if (indeksCeny(&wynik.ceny, p.at(1).asSlice(), data.dzien) >= 0) {
+                    wynik.bledy.push(f"wiersz {wiersz}: powtorzona cena {p.at(1).asSlice()} z dnia {p.at(0).asSlice()}");
+                } else {
+                    var c: Cena;
+                    c.dzien = data.dzien;
+                    c.instrument.append(p.at(1).asSlice());
+                    c.cena = cena.wartosc;
+                    c.wiersz = wiersz;
+                    wynik.ceny.push(move c);
+                }
+            }
+        }
+        numer += 1;
+    }
+    wynik.ok = wynik.bledy.length() == 0;
+    if (not wynik.ok) wynik.ceny.clear();
+    return wynik;
+}
+
+fun indeksCeny(ceny: ref List[Cena], instrument: str, dzien: i64) -> i64 = {
+    var i: i64 = 0;
+    while (i < ceny.length()) {
+        if (ceny.at(i).dzien == dzien and tekst.rowne(ceny.at(i).instrument.asSlice(), instrument)) return i;
+        i += 1;
+    }
+    return -1;
+}

@@ -1,0 +1,217 @@
+# Testy DuckFolio: build.py podstawia ten plik w miejsce app/app.dk.
+# Każde sprawdzenie wypisuje PASS albo FAIL; kod zakończenia to liczba błędów.
+import core.containers.*;
+import tekst;
+import dane;
+import portfel;
+import wycena;
+import sesja;
+
+let OPERACJE = "data,kolejnosc,typ,instrument,liczba,cena,kwota,prowizja\n2026-01-02,1,wplata,,,,1000.00,0.00\n2026-01-03,1,kupno,ALFA,10,20.00,,2.00\n2026-01-04,1,kupno,BETA,5,30.00,,1.00\n2026-01-05,1,sprzedaz,ALFA,4,25.00,,1.00\n2026-01-06,1,wplata,,,,200.00,0.00\n2026-01-06,2,wyplata,,,,50.00,0.00\n";
+let CENY = "data,instrument,cena\n2026-01-03,ALFA,20.00\n2026-01-04,ALFA,22.00\n2026-01-04,BETA,30.00\n2026-01-05,ALFA,25.00\n2026-01-05,BETA,32.00\n2026-01-06,ALFA,25.00\n2026-01-06,BETA,32.00\n2026-01-07,ALFA,20.00\n2026-01-07,BETA,28.00\n";
+let OCZEKIWANE = "data,gotowka,alfa_liczba,beta_liczba,alfa_wartosc,beta_wartosc,wartosc_portfela,wplaty_zewnetrzne,wyplaty_zewnetrzne,wynik_kwotowy\n2026-01-02,1000.00,0,0,0.00,0.00,1000.00,1000.00,0.00,0.00\n2026-01-03,798.00,10,0,200.00,0.00,998.00,1000.00,0.00,-2.00\n2026-01-04,647.00,10,5,220.00,150.00,1017.00,1000.00,0.00,17.00\n2026-01-05,746.00,6,5,150.00,160.00,1056.00,1000.00,0.00,56.00\n2026-01-06,896.00,6,5,150.00,160.00,1206.00,1200.00,50.00,56.00\n2026-01-07,896.00,6,5,120.00,140.00,1156.00,1200.00,50.00,6.00\n";
+
+fun sprawdz(warunek: bool, nazwa: str) -> i64 = {
+    if (warunek) {
+        print(f"PASS {nazwa}\n");
+        return 0;
+    }
+    print(f"FAIL {nazwa}\n");
+    return 1;
+}
+
+fun dzien(s: str) -> i64 = tekst.parsujDate(s).dzien;
+
+fun zawiera(calosc: str, fragment: str) -> bool = {
+    var i: i64 = 0;
+    while (i + fragment.length() <= calosc.length()) {
+        if (tekst.rowne(tekst.wytnij(calosc, i, fragment.length()).asSlice(), fragment)) return true;
+        i += 1;
+    }
+    return false;
+}
+
+fun sesjaPrzykladowa() -> sesja.Sesja = {
+    var s: sesja.Sesja;
+    sesja.wczytajZTekstu(&s, OPERACJE, CENY);
+    return s;
+}
+
+fun testyTekstu() -> i64 = {
+    var b: i64 = 0;
+    b += sprawdz(tekst.parsujDate("2026-01-05").ok and tekst.rowne(tekst.tekstDaty(dzien("2026-01-05")).asSlice(), "2026-01-05"), "data: odczyt i zapis RRRR-MM-DD");
+    b += sprawdz(dzien("2026-01-06") - dzien("2026-01-05") == 1 and dzien("2026-03-01") - dzien("2026-02-28") == 1, "data: kolejne dni i koniec lutego");
+    b += sprawdz(not tekst.parsujDate("2026-02-30").ok and not tekst.parsujDate("2026-02-29").ok and tekst.parsujDate("2024-02-29").ok, "data: 30 lutego bledny, 29 lutego tylko w roku przestepnym");
+    b += sprawdz(not tekst.parsujDate("2026-13-01").ok and not tekst.parsujDate("2026-1-5").ok and not tekst.parsujDate("05.01.2026").ok, "data: zly miesiac i format odrzucone");
+    b += sprawdz(tekst.rowne(tekst.tekstDaty(dzien("2000-02-29")).asSlice(), "2000-02-29") and tekst.rowne(tekst.tekstDaty(dzien("1999-12-31") + 1).asSlice(), "2000-01-01"), "data: rok 2000 i przejscie roku");
+    b += sprawdz(tekst.parsujKwote("1000.00", 100000000).wartosc == 100000 and tekst.parsujKwote("20", 100000).wartosc == 2000 and tekst.parsujKwote("20.5", 100000).wartosc == 2050, "kwota: grosze z kropka dziesietna");
+    b += sprawdz(not tekst.parsujKwote("-5.00", 100000).ok and not tekst.parsujKwote("1,00", 100000).ok and not tekst.parsujKwote("1.234", 100000).ok and not tekst.parsujKwote(".5", 100000).ok and not tekst.parsujKwote("", 100000).ok, "kwota: znak, przecinek, 3 miejsca i brak cyfr odrzucone");
+    b += sprawdz(not tekst.parsujKwote("1000.01", 100000).ok and tekst.parsujKwote("1000.00", 100000).ok, "kwota: granica maksimum");
+    b += sprawdz(tekst.rowne(tekst.kwotaTekst(-200).asSlice(), "-2.00") and tekst.rowne(tekst.kwotaTekst(105600).asSlice(), "1056.00") and tekst.rowne(tekst.kwotaTekst(5).asSlice(), "0.05"), "kwota: zapis z dwiema cyframi");
+    let w = tekst.wiersze("a,b\r\nc\r\n\r\nd");
+    b += sprawdz(w.length() == 4 and tekst.rowne(w.at(0).asSlice(), "a,b") and w.at(2).length() == 0 and tekst.rowne(w.at(3).asSlice(), "d"), "CSV: wiersze z CRLF i bez konca na koncu");
+    let p = tekst.pola("2026-01-02, 1 ,wplata,,,,1000.00,0.00", ',');
+    b += sprawdz(p.length() == 8 and tekst.rowne(p.at(1).asSlice(), "1") and p.at(3).length() == 0, "CSV: puste pola i przyciecie spacji");
+    return b;
+}
+
+fun testyWczytania() -> i64 = {
+    var b: i64 = 0;
+    let op = dane.wczytajOperacje(OPERACJE);
+    b += sprawdz(op.ok and op.operacje.length() == 6, "wczytanie 6 operacji przykladu");
+    let c = dane.wczytajCeny(CENY);
+    b += sprawdz(c.ok and c.ceny.length() == 9, "wczytanie 9 cen przykladu");
+    let zla = dane.wczytajOperacje("data,kolejnosc,typ,instrument,liczba,cena,kwota,prowizja\n2026-01-02,1,wplata,,,,1000.00,0.00\n2026-02-30,1,kupno,ALFA,1,20.00,,0.00\n");
+    b += sprawdz(not zla.ok and zla.operacje.length() == 0 and zla.bledy.length() == 1 and zawiera(zla.bledy.at(0).asSlice(), "wiersz 3"), "data 2026-02-30: caly plik odrzucony, blad z numerem wiersza");
+    let naglowek = dane.wczytajOperacje("data;kolejnosc\n");
+    b += sprawdz(not naglowek.ok, "zly naglowek odrzucony");
+    let wiele = dane.wczytajOperacje("data,kolejnosc,typ,instrument,liczba,cena,kwota,prowizja\n2026-01-02,1,przelew,,,,10.00,0.00\n2026-01-02,2,kupno,alfa,1,20.00,,0.00\n2026-01-02,3,kupno,ALFA,0,20.00,,0.00\n2026-01-02,4,wplata,ALFA,,,10.00,0.00\n2026-01-02,5,wplata,,,,0.00,0.00\n2026-01-02,5,wplata,,,,1.00\n");
+    b += sprawdz(not wiele.ok and wiele.bledy.length() == 6, "wszystkie bledy wierszy zgloszone naraz (typ, nazwa, liczba 0, zbedny instrument, kwota 0, liczba pol)");
+    let powtorka = dane.wczytajOperacje("data,kolejnosc,typ,instrument,liczba,cena,kwota,prowizja\n2026-01-02,1,wplata,,,,10.00,0.00\n2026-01-02,1,wplata,,,,20.00,0.00\n");
+    b += sprawdz(not powtorka.ok and zawiera(powtorka.bledy.at(0).asSlice(), "powtorzona para"), "powtorzona para (data, kolejnosc) odrzucona");
+    let nieposortowane = dane.wczytajOperacje("data,kolejnosc,typ,instrument,liczba,cena,kwota,prowizja\n2026-01-03,1,kupno,ALFA,1,20.00,,0.00\n2026-01-02,2,wplata,,,,5.00,\n2026-01-02,1,wplata,,,,100.00,0.00\n");
+    b += sprawdz(nieposortowane.ok and nieposortowane.operacje.at(0).kolejnosc == 1 and nieposortowane.operacje.at(1).kwota == 500
+        and nieposortowane.operacje.at(2).typ == dane.KUPNO and nieposortowane.operacje.at(1).prowizja == 0,
+        "operacje sortowane po (data, kolejnosc); pusta prowizja = 0");
+    let ceny = dane.wczytajCeny("data,instrument,cena\n2026-01-03,ALFA,20.00\n2026-01-03,ALFA,21.00\n2026-01-03,BETA,0.00\n");
+    b += sprawdz(not ceny.ok and ceny.bledy.length() == 2, "ceny: powtorzona cena i cena 0 odrzucone");
+    return b;
+}
+
+fun testyRaportu() -> i64 = {
+    var b: i64 = 0;
+    var s = sesjaPrzykladowa();
+    b += sprawdz(s.wczytane, "sesja: dane przykladowe wczytane");
+    var porownanie = sesja.porownaj(&s, OCZEKIWANE);
+    b += sprawdz(porownanie.ok and porownanie.zgodne == 6, "wszystkie 6 dni zgodne z oczekiwane-wyniki.csv");
+    let r5 = wycena.raport(&s.operacje, &s.ceny, dzien("2026-01-05"), false);
+    b += sprawdz(r5.ok and r5.gotowka == 74600 and r5.wartosc == 105600 and r5.wynik == 5600, "5 stycznia: gotowka 746.00, wartosc 1056.00, wynik 56.00");
+    b += sprawdz(r5.udzialGotowki == 7064 and r5.skladniki.at(0).udzial == 1420 and r5.skladniki.at(1).udzial == 1515, "udzialy 5 stycznia: 70.64%, 14.20%, 15.15% (zaokraglenie do 0.01%)");
+    let r6 = wycena.raport(&s.operacje, &s.ceny, dzien("2026-01-06"), false);
+    b += sprawdz(r6.ok and r6.wartosc == 120600 and r6.wynik == 5600, "6 stycznia: wplata i wyplata zmieniaja wartosc (1206.00), ale nie wynik (56.00)");
+    let r1 = wycena.raport(&s.operacje, &s.ceny, dzien("2026-01-01"), false);
+    b += sprawdz(r1.ok and r1.wartosc == 0 and not r1.udzialyDostepne, "dzien przed pierwsza operacja: wartosc 0, udzialy niedostepne");
+    var opis = wycena.opisRaportu(&r1);
+    b += sprawdz(zawiera(opis.asSlice(), "n/d"), "wartosc 0: udzial opisany jako n/d");
+    b += sprawdz(wycena.udzial(1, 3) == 3333 and wycena.udzial(2, 3) == 6667 and wycena.udzial(1, 8) == 1250 and wycena.udzial(5, 5) == 10000, "udzial: zaokraglenie polowkowe w gore");
+    b += sprawdz(wycena.udzial(1000000000000000000, 1000000000000000000) == 10000, "udzial: brak przepelnienia dla 1e18 groszy");
+    var historia = wycena.opisHistorii(&s.operacje, &s.ceny, dzien("2026-01-07"), false);
+    b += sprawdz(zawiera(historia.asSlice(), "2026-01-07") and zawiera(historia.asSlice(), "1156.00") and zawiera(historia.asSlice(), "-2.00"), "historia: wiersze dni z wartosciami i wynikami");
+    return b;
+}
+
+fun testyBledow() -> i64 = {
+    var b: i64 = 0;
+    var s = sesjaPrzykladowa();
+    let przed = s.operacje.length();
+    var o = sesja.dodaj(&s, "2026-01-05,2,sprzedaz,ALFA,7,25.00,,1.00");
+    b += sprawdz(not o.ok and zawiera(o.tekst.asSlice(), "portfel ma 6") and s.operacje.length() == przed, "sprzedaz 7 ALFA przy 6: odrzucona z opisem, portfel bez zmian");
+    var o2 = sesja.dodaj(&s, "2026-01-05,2,kupno,ALFA,40,25.00,,0.00");
+    b += sprawdz(not o2.ok and zawiera(o2.tekst.asSlice(), "gotowka bylaby ujemna") and s.operacje.length() == przed, "kupno ALFA za 1000.00 przy gotowce 746.00: odrzucone");
+    let r = wycena.raport(&s.operacje, &s.ceny, dzien("2026-01-05"), false);
+    b += sprawdz(r.ok and r.gotowka == 74600 and wycena.jednostkiInstrumentu(&r, "ALFA") == 6, "po odrzuceniach stan 5 stycznia nadal 746.00 i 6 ALFA");
+    var o3 = sesja.dodaj(&s, "2026-02-30,1,wplata,,,,10.00,0.00");
+    b += sprawdz(not o3.ok and zawiera(o3.tekst.asSlice(), "niepoprawna data"), "operacja z data 2026-02-30 odrzucona");
+    var o4 = sesja.dodaj(&s, "2026-01-03,2,wyplata,,,,700.00,0.00");
+    b += sprawdz(not o4.ok and zawiera(o4.tekst.asSlice(), "2026-01-04") and s.operacje.length() == przed, "wyplata, po ktorej pozniejsze kupno staje sie niewykonalne: odrzucona");
+    var o5 = sesja.dodaj(&s, "2026-01-05,2,sprzedaz,ALFA,6,25.00,,1.00");
+    b += sprawdz(o5.ok and s.operacje.length() == przed + 1, "poprawna sprzedaz 6 ALFA przyjeta");
+    let r2 = wycena.raport(&s.operacje, &s.ceny, dzien("2026-01-05"), false);
+    b += sprawdz(r2.ok and r2.gotowka == 74600 + 15000 - 100 and wycena.jednostkiInstrumentu(&r2, "ALFA") == 0, "po sprzedazy: gotowka 895.00 i 0 ALFA");
+    let p = sesja.wykonaj(&s, "dodaj 2026-01-05,2,wplata,,,,1.00,0.00");
+    b += sprawdz(not p.ok, "powtorzona para (data, kolejnosc) w poleceniu dodaj odrzucona");
+    return b;
+}
+
+fun testyCen() -> i64 = {
+    var b: i64 = 0;
+    var s = sesjaPrzykladowa();
+    sesja.usunCene(&s, "2026-01-05", "BETA");
+    let scisla = wycena.raport(&s.operacje, &s.ceny, dzien("2026-01-05"), false);
+    b += sprawdz(not scisla.ok and zawiera(scisla.bledy.at(0).asSlice(), "BETA"), "brak ceny BETA, polityka scisla: raport odrzucony z opisem");
+    let wstecz = wycena.raport(&s.operacje, &s.ceny, dzien("2026-01-05"), true);
+    b += sprawdz(wstecz.ok and wstecz.skladniki.at(1).cena == 3000 and wstecz.skladniki.at(1).wycenaWstecz and wstecz.wartosc == 74600 + 15000 + 15000,
+        "polityka wstecz: cena BETA z 4 stycznia (30.00), oznaczona");
+    var opis = wycena.opisRaportu(&wstecz);
+    b += sprawdz(zawiera(opis.asSlice(), "uzyto ceny z 2026-01-04"), "raport opisuje uzycie wczesniejszej ceny");
+    sesja.usunCene(&s, "2026-01-04", "BETA");
+    let pozniejsza = wycena.raport(&s.operacje, &s.ceny, dzien("2026-01-05"), true);
+    b += sprawdz(not pozniejsza.ok, "cena z dnia pozniejszego (6 stycznia) nie zastepuje brakujacej");
+    let zeroJednostek = wycena.znajdzCene(&s.ceny, "GAMMA", dzien("2026-01-05"), true);
+    b += sprawdz(not zeroJednostek.ok, "brak jakiejkolwiek ceny instrumentu wykryty");
+    var h = wycena.opisHistorii(&s.operacje, &s.ceny, dzien("2026-01-07"), false);
+    b += sprawdz(zawiera(h.asSlice(), "brak wyceny") and zawiera(h.asSlice(), "1156.00"), "historia oznacza dni bez ceny i liczy pozostale");
+    return b;
+}
+
+fun testyPortfela() -> i64 = {
+    var b: i64 = 0;
+    var p: portfel.Portfel;
+    var wplata: dane.Operacja;
+    wplata.typ = dane.WPLATA;
+    wplata.kwota = 20000;
+    wplata.prowizja = 100;
+    let d1 = portfel.zastosuj(&p, &wplata);
+    b += sprawdz(d1.ok and p.gotowka == 19900 and p.wplaty == 20000, "wplata z prowizja: gotowka = kwota - prowizja, wplaty = kwota");
+    var kupno: dane.Operacja;
+    kupno.typ = dane.KUPNO;
+    kupno.instrument.append("ALFA");
+    kupno.liczba = 10;
+    kupno.cena = 1990;
+    kupno.prowizja = 0;
+    let d2 = portfel.zastosuj(&p, &kupno);
+    b += sprawdz(d2.ok and p.gotowka == 0 and portfel.liczbaJednostek(&p, "ALFA") == 10, "kupno za cala gotowke: gotowka dokladnie 0");
+    kupno.liczba = 1;
+    let d3 = portfel.zastosuj(&p, &kupno);
+    b += sprawdz(not d3.ok and p.gotowka == 0 and portfel.liczbaJednostek(&p, "ALFA") == 10, "kupno bez gotowki odrzucone, nic sie nie zmienia");
+    var sprzedaz: dane.Operacja;
+    sprzedaz.typ = dane.SPRZEDAZ;
+    sprzedaz.instrument.append("ALFA");
+    sprzedaz.liczba = 1;
+    sprzedaz.cena = 50;
+    sprzedaz.prowizja = 100;
+    let d4 = portfel.zastosuj(&p, &sprzedaz);
+    b += sprawdz(not d4.ok and portfel.liczbaJednostek(&p, "ALFA") == 10, "sprzedaz, ktorej prowizja przekracza przychod przy zerowej gotowce: odrzucona");
+    var duzo: dane.Operacja;
+    duzo.typ = dane.KUPNO;
+    duzo.instrument.append("BETA");
+    duzo.liczba = dane.MAKS_LICZBA;
+    duzo.cena = dane.MAKS_CENA;
+    let d5 = portfel.zastosuj(&p, &duzo);
+    b += sprawdz(not d5.ok, "najwieksze kupno (1e7 x 1e9 gr) liczone bez przepelnienia i odrzucone przez brak gotowki");
+    return b;
+}
+
+fun testySesji() -> i64 = {
+    var b: i64 = 0;
+    var s: sesja.Sesja;
+    let bez = sesja.wykonaj(&s, "raport 2026-01-05");
+    b += sprawdz(not bez.ok and zawiera(bez.tekst.asSlice(), "wczytaj"), "raport bez danych: prosba o wczytanie");
+    sesja.wczytajZTekstu(&s, OPERACJE, CENY);
+    let zle = sesja.wczytajZTekstu(&s, "data,kolejnosc,typ,instrument,liczba,cena,kwota,prowizja\n2026-01-02,1,kupno,ALFA,1,20.00,,0.00\n", CENY);
+    b += sprawdz(not zle.ok and s.operacje.length() == 6, "niewykonalne dane (kupno bez gotowki) odrzucone, poprzednie dane zostaja");
+    let raport = sesja.wykonaj(&s, "raport 2026-01-05");
+    b += sprawdz(raport.ok and zawiera(raport.tekst.asSlice(), "1056.00") and zawiera(raport.tekst.asSlice(), "Wynik kwotowy: 56.00"), "polecenie raport");
+    let komentarz = sesja.wykonaj(&s, "  # komentarz");
+    b += sprawdz(komentarz.ok and komentarz.tekst.length() == 0, "komentarz pomijany");
+    let nieznane = sesja.wykonaj(&s, "kup ALFA");
+    b += sprawdz(not nieznane.ok, "nieznane polecenie odrzucone");
+    let zlaData = sesja.wykonaj(&s, "raport 2026-02-30");
+    b += sprawdz(not zlaData.ok, "raport z data 2026-02-30 odrzucony");
+    let wstecz = sesja.wykonaj(&s, "wycena wstecz");
+    b += sprawdz(wstecz.ok and s.wstecz, "zmiana polityki wyceny");
+    return b;
+}
+
+fun main() -> i64 = {
+    var bledy: i64 = 0;
+    bledy += testyTekstu();
+    bledy += testyWczytania();
+    bledy += testyRaportu();
+    bledy += testyBledow();
+    bledy += testyCen();
+    bledy += testyPortfela();
+    bledy += testySesji();
+    print(f"Bledy: {bledy}\n");
+    return bledy;
+}

@@ -1,0 +1,19 @@
+# Demonstracja DuckFolio (karta P01): python3 run.py --build build --workdir . < demo/demo.txt
+wczytaj dane/operacje.csv dane/ceny.csv
+operacje
+# Wplata 200 i wyplata 50 zmieniaja wartosc portfela, ale nie wynik.
+raport 2026-01-05
+raport 2026-01-06
+historia 2026-01-07
+sprawdz dane/oczekiwane-wyniki.csv
+# Bledne operacje: zadna nie zmienia portfela.
+dodaj 2026-01-05,2,sprzedaz,ALFA,7,25.00,,1.00
+dodaj 2026-01-05,2,kupno,ALFA,40,25.00,,0.00
+dodaj 2026-02-30,1,wplata,,,,10.00,0.00
+raport 2026-01-05
+# Brak ceny BETA z 5 stycznia: polityka scisla, potem wstecz.
+usun-cene 2026-01-05 BETA
+raport 2026-01-05
+wycena wstecz
+raport 2026-01-05
+koniec

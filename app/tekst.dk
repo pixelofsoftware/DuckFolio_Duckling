@@ -1,0 +1,301 @@
+#{
+    Pomocnicze operacje na tekście: dzielenie na wiersze i pola CSV, odczyt liczb, kwot i dat
+    oraz formatowanie kwot, udziałów i kolumn tabeli. Moduł nie zna reguł portfela.
+
+    Kwoty trzymamy w groszach (i64), więc nie ma błędów zaokrągleń liczb zmiennoprzecinkowych.
+    Daty zamieniamy na numer dnia (dni od 1970-01-01), co ułatwia porównywanie i sortowanie.
+#}
+import core.containers.*;
+
+const MIN_ROK: i64 = 1900;
+const MAKS_ROK: i64 = 2199;
+
+fun rowne(a: str, b: str) -> bool = {
+    if (a.length() != b.length()) return false;
+    var i: i64 = 0;
+    while (i < a.length()) {
+        if (a[i] != b[i]) return false;
+        i += 1;
+    }
+    return true;
+}
+
+# Porównanie leksykograficzne bajtów: ujemne, 0 albo dodatnie.
+fun porownaj(a: str, b: str) -> i64 = {
+    var i: i64 = 0;
+    while (i < a.length() and i < b.length()) {
+        if (a[i] != b[i]) return (a[i] as i64) - (b[i] as i64);
+        i += 1;
+    }
+    return a.length() - b.length();
+}
+
+fun wytnij(s: str, od: i64, ile: i64) -> String = {
+    var wynik: String;
+    var i = od;
+    while (i < od + ile and i < s.length()) {
+        wynik.append(s[i]);
+        i += 1;
+    }
+    return wynik;
+}
+
+fun bialy(znak: char) -> bool = znak == ' ' or znak == '\t' or znak == '\r' or znak == '\n';
+
+# Tekst bez spacji, tabulatorów i znaków końca wiersza na początku i na końcu.
+fun przytnij(s: str) -> String = {
+    var poczatek: i64 = 0;
+    var koniec = s.length();
+    while (poczatek < koniec and bialy(s[poczatek])) poczatek += 1;
+    while (koniec > poczatek and bialy(s[koniec - 1])) koniec -= 1;
+    return wytnij(s, poczatek, koniec - poczatek);
+}
+
+# Wiersze tekstu bez znaków LF i CR; znak BOM UTF-8 na początku pliku jest pomijany.
+fun wiersze(zawartosc: str) -> List[String] = {
+    var wynik: List[String];
+    var biezacy: String;
+    var i: i64 = 0;
+    if (zawartosc.length() >= 3 and (zawartosc[0] as u8) == 0xEFu8 and (zawartosc[1] as u8) == 0xBBu8
+        and (zawartosc[2] as u8) == 0xBFu8) {
+        i = 3;
+    }
+    while (i < zawartosc.length()) {
+        let znak = zawartosc[i];
+        if (znak == '\n') {
+            wynik.push(copy biezacy);
+            biezacy.clear();
+        } else if (znak != '\r') {
+            biezacy.append(znak);
+        }
+        i += 1;
+    }
+    if (biezacy.length() > 0) wynik.push(move biezacy);
+    return wynik;
+}
+
+# Pola rozdzielone separatorem; każde pole przycięte. Cudzysłowy nie są obsługiwane.
+fun pola(linia: str, separator: char) -> List[String] = {
+    var wynik: List[String];
+    var poczatek: i64 = 0;
+    var i: i64 = 0;
+    while (i <= linia.length()) {
+        if (i == linia.length() or linia[i] == separator) {
+            let kawalek = wytnij(linia, poczatek, i - poczatek);
+            wynik.push(przytnij(kawalek.asSlice()));
+            poczatek = i + 1;
+        }
+        i += 1;
+    }
+    return wynik;
+}
+
+# Słowa oddzielone spacjami (do poleceń tekstowych); kolejne spacje się nie liczą.
+fun slowa(linia: str) -> List[String] = {
+    var wynik: List[String];
+    var biezace: String;
+    var i: i64 = 0;
+    while (i <= linia.length()) {
+        if (i == linia.length() or linia[i] == ' ' or linia[i] == '\t') {
+            if (biezace.length() > 0) {
+                wynik.push(copy biezace);
+                biezace.clear();
+            }
+        } else {
+            biezace.append(linia[i]);
+        }
+        i += 1;
+    }
+    return wynik;
+}
+
+fun cyfra(znak: char) -> bool = znak >= '0' and znak <= '9';
+
+class WynikLiczby {
+    ok: bool = false;
+    wartosc: i64 = 0;
+}
+
+# Liczba całkowita bez znaku, od 0 do maks; tylko cyfry.
+fun parsujLiczbe(s: str, maks: i64) -> WynikLiczby = {
+    var wynik = WynikLiczby();
+    if (s.length() == 0 or s.length() > 18) return wynik;
+    var wartosc: i64 = 0;
+    var i: i64 = 0;
+    while (i < s.length()) {
+        if (not cyfra(s[i])) return wynik;
+        wartosc = wartosc * 10 + ((s[i] as i64) - ('0' as i64));
+        i += 1;
+    }
+    if (wartosc > maks) return wynik;
+    wynik.ok = true;
+    wynik.wartosc = wartosc;
+    return wynik;
+}
+
+#{
+    Kwota z kropką dziesiętną zamieniona na grosze: "1000.00", "20", "20.5" (= 20,50).
+    Najwyżej dwie cyfry po kropce, bez znaku, przecinka, spacji i notacji wykładniczej;
+    przed kropką musi stać cyfra. Wynik w zakresie 0..maks groszy.
+#}
+fun parsujKwote(s: str, maks: i64) -> WynikLiczby = {
+    var wynik = WynikLiczby();
+    var kropka: i64 = -1;
+    var i: i64 = 0;
+    while (i < s.length()) {
+        if (s[i] == '.') {
+            if (kropka >= 0) return wynik;
+            kropka = i;
+        } else if (not cyfra(s[i])) {
+            return wynik;
+        }
+        i += 1;
+    }
+    var calosc = s.length();
+    if (kropka >= 0) calosc = kropka;
+    if (calosc == 0 or calosc > 13) return wynik;
+    let ulamek = s.length() - calosc - 1;
+    if (kropka >= 0 and (ulamek < 1 or ulamek > 2)) return wynik;
+    var zlote: i64 = 0;
+    var k: i64 = 0;
+    while (k < calosc) {
+        zlote = zlote * 10 + ((s[k] as i64) - ('0' as i64));
+        k += 1;
+    }
+    var grosze: i64 = 0;
+    if (kropka >= 0) {
+        grosze = ((s[kropka + 1] as i64) - ('0' as i64)) * 10;
+        if (ulamek == 2) grosze += (s[kropka + 2] as i64) - ('0' as i64);
+    }
+    let razem = zlote * 100 + grosze;
+    if (razem > maks) return wynik;
+    wynik.ok = true;
+    wynik.wartosc = razem;
+    return wynik;
+}
+
+fun przestepny(rok: i64) -> bool = (rok % 4 == 0 and rok % 100 != 0) or rok % 400 == 0;
+
+fun dniMiesiaca(rok: i64, miesiac: i64) -> i64 = {
+    if (miesiac == 2) {
+        if (przestepny(rok)) return 29;
+        return 28;
+    }
+    if (miesiac == 4 or miesiac == 6 or miesiac == 9 or miesiac == 11) return 30;
+    return 31;
+}
+
+# Numer dnia (dni od 1970-01-01) dla daty kalendarza gregoriańskiego.
+fun numerDnia(rok: i64, miesiac: i64, dzien: i64) -> i64 = {
+    var r = rok;
+    if (miesiac <= 2) r -= 1;
+    let era = r / 400;
+    let rokEry = r - era * 400;
+    let m = (miesiac + 9) % 12;
+    let dzienRoku = (153 * m + 2) / 5 + dzien - 1;
+    let dzienEry = rokEry * 365 + rokEry / 4 - rokEry / 100 + dzienRoku;
+    return era * 146097 + dzienEry - 719468;
+}
+
+class WynikDaty {
+    ok: bool = false;
+    dzien: i64 = 0;
+}
+
+# Data w formacie RRRR-MM-DD, z prawdziwą liczbą dni miesiąca (2026-02-30 jest błędna).
+fun parsujDate(s: str) -> WynikDaty = {
+    var wynik = WynikDaty();
+    if (s.length() != 10 or s[4] != '-' or s[7] != '-') return wynik;
+    let rok = parsujLiczbe(wytnij(s, 0, 4).asSlice(), 9999);
+    let miesiac = parsujLiczbe(wytnij(s, 5, 2).asSlice(), 99);
+    let dzien = parsujLiczbe(wytnij(s, 8, 2).asSlice(), 99);
+    if (not rok.ok or not miesiac.ok or not dzien.ok) return wynik;
+    if (rok.wartosc < MIN_ROK or rok.wartosc > MAKS_ROK) return wynik;
+    if (miesiac.wartosc < 1 or miesiac.wartosc > 12) return wynik;
+    if (dzien.wartosc < 1 or dzien.wartosc > dniMiesiaca(rok.wartosc, miesiac.wartosc)) return wynik;
+    wynik.ok = true;
+    wynik.dzien = numerDnia(rok.wartosc, miesiac.wartosc, dzien.wartosc);
+    return wynik;
+}
+
+fun dwieCyfry(wynik: ref String, n: i64) -> () = {
+    if (n < 10) wynik.append('0');
+    wynik.append(n.toString());
+}
+
+# Numer dnia z powrotem jako RRRR-MM-DD.
+fun tekstDaty(numer: i64) -> String = {
+    let z = numer + 719468;
+    let era = z / 146097;
+    let dzienEry = z - era * 146097;
+    let rokEry = (dzienEry - dzienEry / 1460 + dzienEry / 36524 - dzienEry / 146096) / 365;
+    let dzienRoku = dzienEry - (365 * rokEry + rokEry / 4 - rokEry / 100);
+    let m = (5 * dzienRoku + 2) / 153;
+    let dzien = dzienRoku - (153 * m + 2) / 5 + 1;
+    var miesiac = m + 3;
+    if (m >= 10) miesiac = m - 9;
+    var rok = rokEry + era * 400;
+    if (miesiac <= 2) rok += 1;
+    var wynik: String;
+    wynik.append(rok.toString());
+    wynik.append('-');
+    dwieCyfry(&wynik, miesiac);
+    wynik.append('-');
+    dwieCyfry(&wynik, dzien);
+    return wynik;
+}
+
+# Grosze jako kwota z dwiema cyframi po kropce, np. -2.00 albo 1056.00.
+fun kwotaTekst(grosze: i64) -> String = {
+    var wynik: String;
+    var reszta = grosze;
+    if (reszta < 0) {
+        wynik.append('-');
+        reszta = -reszta;
+    }
+    wynik.append((reszta / 100).toString());
+    wynik.append('.');
+    dwieCyfry(&wynik, reszta % 100);
+    return wynik;
+}
+
+# Udział w setnych częściach procentu (np. 1420 = 14.20%).
+fun udzialTekst(setne: i64) -> String = {
+    var wynik: String;
+    wynik.append((setne / 100).toString());
+    wynik.append('.');
+    dwieCyfry(&wynik, setne % 100);
+    wynik.append('%');
+    return wynik;
+}
+
+# Tekst dopełniony spacjami do szerokości (z lewej, gdy doPrawej, czyli wyrównany do prawej).
+fun kolumna(s: str, szerokosc: i64, doPrawej: bool) -> String = {
+    var wynik: String;
+    var brak = szerokosc - s.length();
+    if (doPrawej) {
+        while (brak > 0) { wynik.append(' '); brak -= 1; }
+        wynik.append(s);
+    } else {
+        wynik.append(s);
+        while (brak > 0) { wynik.append(' '); brak -= 1; }
+    }
+    return wynik;
+}
+
+fun duzeLitery(s: str) -> String = {
+    var wynik: String;
+    var i: i64 = 0;
+    while (i < s.length()) {
+        var znak = s[i];
+        if (znak >= 'a' and znak <= 'z') znak = ((znak as i64) - 32) as char;
+        wynik.append(znak);
+        i += 1;
+    }
+    return wynik;
+}
+
+fun konczySie(s: str, koncowka: str) -> bool = {
+    if (s.length() < koncowka.length()) return false;
+    return rowne(wytnij(s, s.length() - koncowka.length(), koncowka.length()).asSlice(), koncowka);
+}

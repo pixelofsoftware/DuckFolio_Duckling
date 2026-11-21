@@ -1,0 +1,178 @@
+#{
+    Model portfela: gotówka, liczba jednostek instrumentów i sumy zewnętrznych przepływów.
+
+    Reguły rozliczenia (wszystkie kwoty w groszach):
+    * wpłata:    gotówka += kwota - prowizja; do wpłat zewnętrznych trafia kwota,
+    * wypłata:   gotówka -= kwota + prowizja; do wypłat zewnętrznych trafia kwota,
+    * kupno:     gotówka -= liczba x cena + prowizja; jednostki += liczba,
+    * sprzedaż:  gotówka += liczba x cena - prowizja; jednostki -= liczba.
+
+    Operację najpierw w całości sprawdzamy, a dopiero potem zmieniamy portfel, więc odrzucona
+    operacja nie zmienia niczego (nie wykonuje się jej część). Odrzucamy: sprzedaż większej
+    liczby jednostek niż posiadana, operację prowadzącą do ujemnej gotówki i przekroczenie
+    granic modelu (liczba jednostek, gotówka, liczba instrumentów).
+#}
+import core.containers.*;
+import app.tekst;
+import app.dane;
+
+const MAKS_GOTOWKA: i64 = 100000000000000;    # 1 bln zł w groszach
+const MAKS_INSTRUMENTOW: i64 = 100;
+
+class Pozycja {
+    instrument: String;
+    liczba: i64 = 0;
+}
+
+class Portfel {
+    gotowka: i64 = 0;
+    wplaty: i64 = 0;          # suma wpłat zewnętrznych
+    wyplaty: i64 = 0;         # suma wypłat zewnętrznych
+    prowizje: i64 = 0;        # suma zapłaconych prowizji (informacyjnie)
+    pozycje: List[Pozycja];   # w kolejności pierwszego zakupu; zostają także przy 0 jednostek
+}
+
+class Decyzja {
+    ok: bool = false;
+    powod: String;
+}
+
+fun indeksPozycji(p: ref Portfel, instrument: str) -> i64 = {
+    var i: i64 = 0;
+    while (i < p.pozycje.length()) {
+        if (tekst.rowne(p.pozycje.at(i).instrument.asSlice(), instrument)) return i;
+        i += 1;
+    }
+    return -1;
+}
+
+fun liczbaJednostek(p: ref Portfel, instrument: str) -> i64 = {
+    let i = indeksPozycji(p, instrument);
+    if (i < 0) return 0;
+    return p.pozycje.at(i).liczba;
+}
+
+# Ocenia, czy operację można wykonać, nie zmieniając portfela.
+fun ocen(p: ref Portfel, op: ref dane.Operacja) -> Decyzja = {
+    var wynik: Decyzja;
+    let kwotaOp = tekst.kwotaTekst(op.kwota);
+    let gotowkaOp = tekst.kwotaTekst(p.gotowka);
+    if (op.typ == dane.WPLATA) {
+        let po = p.gotowka + op.kwota - op.prowizja;
+        if (po < 0) {
+            wynik.powod.append(f"prowizja wieksza niz wplata i gotowka ({gotowkaOp.asSlice()}) - gotowka bylaby ujemna");
+            return wynik;
+        }
+        if (po > MAKS_GOTOWKA) {
+            wynik.powod.append("gotowka przekroczylaby granice modelu (1 bln)");
+            return wynik;
+        }
+    }
+    if (op.typ == dane.WYPLATA) {
+        let koszt = op.kwota + op.prowizja;
+        if (koszt > p.gotowka) {
+            let kosztOp = tekst.kwotaTekst(koszt);
+            wynik.powod.append(f"wyplata {kwotaOp.asSlice()} (z prowizja {kosztOp.asSlice()}) przy gotowce {gotowkaOp.asSlice()} - gotowka bylaby ujemna");
+            return wynik;
+        }
+    }
+    if (op.typ == dane.KUPNO) {
+        let koszt = op.liczba * op.cena + op.prowizja;
+        let kosztOp = tekst.kwotaTekst(koszt);
+        if (koszt > p.gotowka) {
+            wynik.powod.append(f"kupno {op.liczba} x {op.instrument.asSlice()} kosztuje {kosztOp.asSlice()} z prowizja, a gotowka to {gotowkaOp.asSlice()} - gotowka bylaby ujemna");
+            return wynik;
+        }
+        let i = indeksPozycji(p, op.instrument.asSlice());
+        if (i < 0 and p.pozycje.length() >= MAKS_INSTRUMENTOW) {
+            wynik.powod.append(f"portfel ma juz {MAKS_INSTRUMENTOW} instrumentow (granica modelu)");
+            return wynik;
+        }
+        if (liczbaJednostek(p, op.instrument.asSlice()) + op.liczba > dane.MAKS_LICZBA) {
+            wynik.powod.append(f"liczba jednostek {op.instrument.asSlice()} przekroczylaby {dane.MAKS_LICZBA}");
+            return wynik;
+        }
+    }
+    if (op.typ == dane.SPRZEDAZ) {
+        let posiadane = liczbaJednostek(p, op.instrument.asSlice());
+        if (op.liczba > posiadane) {
+            wynik.powod.append(f"sprzedaz {op.liczba} jednostek {op.instrument.asSlice()}, a portfel ma {posiadane}");
+            return wynik;
+        }
+        let po = p.gotowka + op.liczba * op.cena - op.prowizja;
+        if (po < 0) {
+            wynik.powod.append(f"prowizja wieksza niz przychod ze sprzedazy i gotowka - gotowka bylaby ujemna");
+            return wynik;
+        }
+        if (po > MAKS_GOTOWKA) {
+            wynik.powod.append("gotowka przekroczylaby granice modelu (1 bln)");
+            return wynik;
+        }
+    }
+    wynik.ok = true;
+    return wynik;
+}
+
+# Wykonuje operację, jeśli jest dopuszczalna; inaczej portfel zostaje bez zmian.
+fun zastosuj(p: ref Portfel, op: ref dane.Operacja) -> Decyzja = {
+    var decyzja = ocen(p, op);
+    if (decyzja.ok) {
+        if (op.typ == dane.WPLATA) {
+            p.gotowka += op.kwota - op.prowizja;
+            p.wplaty += op.kwota;
+        }
+        if (op.typ == dane.WYPLATA) {
+            p.gotowka -= op.kwota + op.prowizja;
+            p.wyplaty += op.kwota;
+        }
+        if (op.typ == dane.KUPNO) {
+            var i = indeksPozycji(p, op.instrument.asSlice());
+            if (i < 0) {
+                var nowa: Pozycja;
+                nowa.instrument.append(op.instrument.asSlice());
+                p.pozycje.push(move nowa);
+                i = p.pozycje.length() - 1;
+            }
+            p.pozycje.at(i).liczba += op.liczba;
+            p.gotowka -= op.liczba * op.cena + op.prowizja;
+        }
+        if (op.typ == dane.SPRZEDAZ) {
+            let j = indeksPozycji(p, op.instrument.asSlice());
+            p.pozycje.at(j).liczba -= op.liczba;
+            p.gotowka += op.liczba * op.cena - op.prowizja;
+        }
+        p.prowizje += op.prowizja;
+    }
+    return decyzja;
+}
+
+class Symulacja {
+    portfel: Portfel;
+    bledy: List[String];       # odrzucone operacje (wiersz, data, kolejność, powód)
+}
+
+fun opisOperacji(op: ref dane.Operacja) -> String = {
+    let gdzie = dane.opisWiersza(op.wiersz);
+    let data = tekst.tekstDaty(op.dzien);
+    return f"{gdzie.asSlice()} ({data.asSlice()}, kolejnosc {op.kolejnosc}, {dane.nazwaTypu(op.typ)})";
+}
+
+#{
+    Odtwarza portfel z operacji o dacie nie późniejszej niż doDnia, w kolejności (data,
+    kolejność). Każda odrzucona operacja jest pomijana w całości i trafia do listy błędów.
+#}
+fun odtworz(operacje: ref List[dane.Operacja], doDnia: i64) -> Symulacja = {
+    var wynik: Symulacja;
+    var i: i64 = 0;
+    while (i < operacje.length()) {
+        if (operacje.at(i).dzien <= doDnia) {
+            let decyzja = zastosuj(&wynik.portfel, operacje.at(i));
+            if (not decyzja.ok) {
+                let opis = opisOperacji(operacje.at(i));
+                wynik.bledy.push(f"{opis.asSlice()} odrzucona: {decyzja.powod.asSlice()}");
+            }
+        }
+        i += 1;
+    }
+    return wynik;
+}
